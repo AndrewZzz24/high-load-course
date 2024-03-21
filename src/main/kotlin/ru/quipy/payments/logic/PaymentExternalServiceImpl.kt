@@ -2,6 +2,9 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.launch
 import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -31,6 +34,7 @@ class PaymentExternalServiceImpl(
 
         val emptyBody = RequestBody.create(null, ByteArray(0))
         val mapper = ObjectMapper().registerKotlinModule()
+        val processPaymentRequestScope = CoroutineScope(Executors.newSingleThreadExecutor().asCoroutineDispatcher())
     }
 
     private var parallelRequestsCounter1 = AtomicInteger(0)
@@ -52,7 +56,7 @@ class PaymentExternalServiceImpl(
         build()
     }
 
-    private fun decrementRequests(accountName: String){
+    private fun decrementRequests(accountName: String) {
         if (accountName == accountName2)
             parallelRequestsCounter2.decrementAndGet()
         else
@@ -62,20 +66,22 @@ class PaymentExternalServiceImpl(
     override fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long) {
         var accountName: String
         var serviceName: String
-        while(true) {
+        while (true) {
             accountName = accountName2
             serviceName = serviceName2
 
             val curParReq1 = parallelRequestsCounter1.get()
             val curParReq2 = parallelRequestsCounter2.get()
 
-            if (curParReq2 >= parallelRequests2 || Duration.ofSeconds((now() - paymentStartedAt) / 1000) > Duration.ofSeconds(10)){
+            if (curParReq2 >= parallelRequests2 || Duration.ofSeconds((now() - paymentStartedAt) / 1000) > Duration.ofSeconds(
+                    10
+                )
+            ) {
                 accountName = accountName1
                 serviceName = serviceName1
                 if (parallelRequestsCounter1.compareAndSet(curParReq1, curParReq1 + 1))
                     break
-            }
-            else
+            } else
                 if (parallelRequestsCounter2.compareAndSet(curParReq2, curParReq2 + 1))
                     break
         }
@@ -92,13 +98,20 @@ class PaymentExternalServiceImpl(
         }
 
         if (Duration.ofSeconds((now() - paymentStartedAt) / 1000) > paymentOperationTimeout
-            || parallelRequestsCounter1.get() > parallelRequests1) {
+            || parallelRequestsCounter1.get() > parallelRequests1
+        ) {
             decrementRequests(accountName)
             paymentESService.update(paymentId) {
                 it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
             }
+        } else {
+            processPaymentRequest(serviceName, accountName, transactionId, paymentId)
         }
-        else {
+    }
+
+
+    private fun processPaymentRequest(serviceName: String, accountName: String, transactionId: UUID, paymentId: UUID) {
+        processPaymentRequestScope.launch {
             val request = Request.Builder().run {
                 url("http://localhost:1234/external/process?serviceName=${serviceName}&accountName=${accountName}&transactionId=$transactionId")
                 post(emptyBody)
