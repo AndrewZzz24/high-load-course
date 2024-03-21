@@ -11,6 +11,7 @@ import okhttp3.Request
 import okhttp3.RequestBody
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
+import ru.quipy.common.utils.NamedThreadFactory
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
@@ -34,7 +35,8 @@ class PaymentExternalServiceImpl(
 
         val emptyBody = RequestBody.create(null, ByteArray(0))
         val mapper = ObjectMapper().registerKotlinModule()
-        val processPaymentRequestScope = CoroutineScope(Executors.newSingleThreadExecutor().asCoroutineDispatcher())
+        val appExecutor = Executors.newFixedThreadPool(500, NamedThreadFactory("main-app-executor"))
+//        val processPaymentRequestScope = CoroutineScope(Executors.newSingleThreadExecutor().asCoroutineDispatcher())
     }
 
     private var parallelRequestsCounter1 = AtomicInteger(0)
@@ -111,7 +113,8 @@ class PaymentExternalServiceImpl(
 
 
     private fun processPaymentRequest(serviceName: String, accountName: String, transactionId: UUID, paymentId: UUID) {
-        processPaymentRequestScope.launch {
+//        CoroutineScope(Executors.newSingleThreadExecutor().asCoroutineDispatcher()).launch {
+        appExecutor.submit {
             val request = Request.Builder().run {
                 url("http://localhost:1234/external/process?serviceName=${serviceName}&accountName=${accountName}&transactionId=$transactionId")
                 post(emptyBody)
