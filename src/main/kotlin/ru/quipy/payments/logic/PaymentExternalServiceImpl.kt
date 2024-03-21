@@ -2,22 +2,21 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.asCoroutineDispatcher
-import kotlinx.coroutines.launch
 import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
+import ru.quipy.common.utils.NamedThreadFactory
+import ru.quipy.common.utils.NonBlockingOngoingWindow
+import ru.quipy.common.utils.RateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicInteger
 
 
 // Advice: always treat time as a Duration
@@ -31,20 +30,22 @@ class PaymentExternalServiceImpl(
         val logger = LoggerFactory.getLogger(PaymentExternalServiceImpl::class.java)
 
         val paymentOperationTimeout = Duration.ofSeconds(80)
-
+        val requestSenderThreadPool = Executors.newFixedThreadPool(500, NamedThreadFactory("request-executor"))
         val emptyBody = RequestBody.create(null, ByteArray(0))
         val mapper = ObjectMapper().registerKotlinModule()
-        val processPaymentRequestScope = CoroutineScope(Executors.newSingleThreadExecutor().asCoroutineDispatcher())
     }
 
-    private var parallelRequestsCounter1 = AtomicInteger(0)
-    private var parallelRequestsCounter2 = AtomicInteger(0)
     private val serviceName1 = properties1.serviceName
     private val accountName1 = properties1.accountName
     private val serviceName2 = properties2.serviceName
     private val accountName2 = properties2.accountName
-    private val parallelRequests1 = properties1.parallelRequests
-    private val parallelRequests2 = properties2.parallelRequests
+
+    private val window1 = NonBlockingOngoingWindow(properties1.parallelRequests)
+    private val window2 = NonBlockingOngoingWindow(properties2.parallelRequests)
+    private val rateLimiter1 = RateLimiter(properties1.rateLimitPerSec)
+    private val rateLimiter2 = RateLimiter(properties2.rateLimitPerSec)
+    private val processTime1 = arrayListOf<Long>()
+    private val processTime2 = arrayListOf<Long>()
 
     @Autowired
     private lateinit var paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>
@@ -56,35 +57,9 @@ class PaymentExternalServiceImpl(
         build()
     }
 
-    private fun decrementRequests(accountName: String) {
-        if (accountName == accountName2)
-            parallelRequestsCounter2.decrementAndGet()
-        else
-            parallelRequestsCounter1.decrementAndGet()
-    }
-
     override fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long) {
-        var accountName: String
-        var serviceName: String
-        while (true) {
-            accountName = accountName2
-            serviceName = serviceName2
-
-            val curParReq1 = parallelRequestsCounter1.get()
-            val curParReq2 = parallelRequestsCounter2.get()
-
-            if (curParReq2 >= parallelRequests2 || Duration.ofSeconds((now() - paymentStartedAt) / 1000) > Duration.ofSeconds(
-                    10
-                )
-            ) {
-                accountName = accountName1
-                serviceName = serviceName1
-                if (parallelRequestsCounter1.compareAndSet(curParReq1, curParReq1 + 1))
-                    break
-            } else
-                if (parallelRequestsCounter2.compareAndSet(curParReq2, curParReq2 + 1))
-                    break
-        }
+        var accountName = accountName2
+        var serviceName = serviceName2
 
         logger.warn("[$accountName] Submitting payment request for payment $paymentId. Already passed: ${now() - paymentStartedAt} ms")
 
@@ -97,21 +72,36 @@ class PaymentExternalServiceImpl(
             it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
         }
 
-        if (Duration.ofSeconds((now() - paymentStartedAt) / 1000) > paymentOperationTimeout
-            || parallelRequestsCounter1.get() > parallelRequests1
+        var window = window2.putIntoWindow()
+        if (!rateLimiter2.tick()
+            || window is NonBlockingOngoingWindow.WindowResponse.Fail
         ) {
-            decrementRequests(accountName)
-            paymentESService.update(paymentId) {
-                it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
+            if (window is NonBlockingOngoingWindow.WindowResponse.Success)
+                window2.releaseWindow()
+            window = window1.putIntoWindow()
+            if (rateLimiter1.tick() && window is NonBlockingOngoingWindow.WindowResponse.Success &&
+                Duration.ofSeconds((now() - paymentStartedAt) / 1000) < paymentOperationTimeout
+            ) {
+                accountName = accountName1
+                serviceName = serviceName1
+                val speed =
+                    minOf(properties1.parallelRequests.div(processTime1.average()).toInt(), properties1.rateLimitPerSec)
+                logger.error("[$accountName] Theoretical speed for $paymentId , txId $transactionId : $speed")
+            } else {
+                if (window is NonBlockingOngoingWindow.WindowResponse.Success)
+                    window1.releaseWindow()
+                paymentESService.update(paymentId) {
+                    it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
+                }
+                return
             }
         } else {
-            processPaymentRequest(serviceName, accountName, transactionId, paymentId)
+            val speed =
+                minOf(properties2.parallelRequests.div(processTime2.average()).toInt(), properties2.rateLimitPerSec)
+            logger.error("[$accountName] Theoretical speed for $paymentId , txId $transactionId : $speed")
         }
-    }
 
-
-    private fun processPaymentRequest(serviceName: String, accountName: String, transactionId: UUID, paymentId: UUID) {
-        processPaymentRequestScope.launch {
+        requestSenderThreadPool.submit {
             val request = Request.Builder().run {
                 url("http://localhost:1234/external/process?serviceName=${serviceName}&accountName=${accountName}&transactionId=$transactionId")
                 post(emptyBody)
@@ -151,7 +141,14 @@ class PaymentExternalServiceImpl(
                     }
                 }
             } finally {
-                decrementRequests(accountName)
+                if (accountName == accountName2) {
+                    window2.releaseWindow()
+                    processTime2.add((now() - paymentStartedAt) / 1000)
+                }
+                if (accountName == accountName1) {
+                    window1.releaseWindow()
+                    processTime1.add((now() - paymentStartedAt) / 1000)
+                }
             }
         }
     }
