@@ -47,6 +47,8 @@ class PaymentExternalServiceImpl(
     private val accountName2 = properties2.accountName
     private val parallelRequests1 = properties1.parallelRequests
     private val parallelRequests2 = properties2.parallelRequests
+    private val processTime1 = arrayListOf<Long>()
+    private val processTime2 = arrayListOf<Long>()
 
     @Autowired
     private lateinit var paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>
@@ -107,12 +109,25 @@ class PaymentExternalServiceImpl(
                 it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
             }
         } else {
-            processPaymentRequest(serviceName, accountName, transactionId, paymentId)
+            if (accountName.equals(accountName1)) {
+                val speed = properties1.parallelRequests.div(processTime1.average()).toInt()
+                logger.error("[$accountName] Theoretical speed for $paymentId , txId $transactionId : $speed")
+            } else {
+                val speed = properties2.parallelRequests.div(processTime2.average()).toInt()
+                logger.error("[$accountName] Theoretical speed for $paymentId , txId $transactionId : $speed")
+            }
+            processPaymentRequest(serviceName, accountName, transactionId, paymentId, paymentStartedAt)
         }
     }
 
 
-    private fun processPaymentRequest(serviceName: String, accountName: String, transactionId: UUID, paymentId: UUID) {
+    private fun processPaymentRequest(
+        serviceName: String,
+        accountName: String,
+        transactionId: UUID,
+        paymentId: UUID,
+        paymentStartedAt: Long
+    ) {
 //        CoroutineScope(Executors.newSingleThreadExecutor().asCoroutineDispatcher()).launch {
         appExecutor.submit {
             val request = Request.Builder().run {
@@ -154,6 +169,11 @@ class PaymentExternalServiceImpl(
                     }
                 }
             } finally {
+                if (accountName == accountName2) {
+                    processTime2.add((now() - paymentStartedAt) / 1000)
+                } else {
+                    processTime1.add((now() - paymentStartedAt) / 1000)
+                }
                 decrementRequests(accountName)
             }
         }
