@@ -110,10 +110,10 @@ class PaymentExternalServiceImpl(
             }
         } else {
             if (accountName.equals(accountName1)) {
-                val speed = properties1.parallelRequests.div(processTime1.average()).toInt()
+                val speed = minOf(properties1.parallelRequests.div(processTime1.average()), properties1.rateLimitPerSec.toDouble())
                 logger.error("[$accountName] Theoretical speed for $paymentId , txId $transactionId : $speed")
             } else {
-                val speed = properties2.parallelRequests.div(processTime2.average()).toInt()
+                val speed = minOf(properties2.parallelRequests.div(processTime1.average()), properties2.rateLimitPerSec.toDouble())
                 logger.error("[$accountName] Theoretical speed for $paymentId , txId $transactionId : $speed")
             }
             processPaymentRequest(serviceName, accountName, transactionId, paymentId, paymentStartedAt)
