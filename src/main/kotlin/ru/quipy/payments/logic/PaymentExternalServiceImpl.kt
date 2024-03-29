@@ -85,7 +85,7 @@ class PaymentExternalServiceImpl(
                 accountName = accountName1
                 serviceName = serviceName1
                 val speed =
-                    minOf(properties1.parallelRequests.div(processTime1.average()).toInt(), properties1.rateLimitPerSec)
+                    minOf(properties1.parallelRequests.div(processTime1.average()), properties1.rateLimitPerSec.toDouble())
                 logger.error("[$accountName] Theoretical speed for $paymentId , txId $transactionId : $speed")
             } else {
                 if (window is NonBlockingOngoingWindow.WindowResponse.Success)
@@ -97,7 +97,7 @@ class PaymentExternalServiceImpl(
             }
         } else {
             val speed =
-                minOf(properties2.parallelRequests.div(processTime2.average()).toInt(), properties2.rateLimitPerSec)
+                minOf(properties2.parallelRequests.div(processTime2.average()), properties2.rateLimitPerSec.toDouble())
             logger.error("[$accountName] Theoretical speed for $paymentId , txId $transactionId : $speed")
         }
 
