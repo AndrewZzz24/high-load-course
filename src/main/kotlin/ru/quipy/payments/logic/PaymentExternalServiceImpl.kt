@@ -141,7 +141,7 @@ class PaymentExternalServiceImpl(
             processPaymentRequest(queue, properties)
         }
 
-        val speed = properties.parallelRequests.div(time.average())
+        val speed = minOf(properties.parallelRequests.div(time.average()), properties.rateLimitPerSec.toDouble())
         logger.error("[${properties.accountName}] Theoretical speed for $paymentId , txId $transactionId : $speed")
     }
 
