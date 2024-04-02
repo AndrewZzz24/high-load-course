@@ -5,14 +5,17 @@ import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import okhttp3.*
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
-import ru.quipy.common.utils.NonBlockingOngoingWindow
-import ru.quipy.common.utils.RateLimiter
+import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import okhttp3.*
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
+import java.io.IOException
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.Executors
+import ru.quipy.common.utils.RateLimiter
+import java.util.*
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
@@ -166,8 +169,35 @@ class PaymentExternalServiceImpl(
             else -> client2
         }
 
-        try {
-            client.newCall(request).execute().use { response ->
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                //                context.release()
+                when (e) {
+                    is SocketTimeoutException -> {
+                        paymentESService.update(paymentInfo.paymentId) {
+                            it.logProcessing(false, now(), paymentInfo.transactionId, reason = "Request timeout.")
+                        }
+                    }
+
+                    else -> {
+                        logger.error("[${properties.accountName}] Payment failed for txId: ${paymentInfo.transactionId}," +
+                                " payment: ${paymentInfo.paymentId}", e)
+
+                        paymentESService.update(paymentInfo.paymentId) {
+                            it.logProcessing(false, now(), paymentInfo.transactionId, reason = e.message)
+                        }
+                    }
+                }
+                val time = when (properties) {
+                    properties4 -> processTime4
+                    properties3 -> processTime3
+                    else -> processTime2
+                }
+
+                time.add((now() - paymentInfo.paymentStartedAt) / 1000)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
                 val body = try {
                     mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
                 } catch (e: Exception) {
@@ -183,34 +213,62 @@ class PaymentExternalServiceImpl(
                 paymentESService.update(paymentInfo.paymentId) {
                     it.logProcessing(body.result, now(), paymentInfo.transactionId, reason = body.message)
                 }
-            }
-        } catch (e: Exception) {
-            when (e) {
-                is SocketTimeoutException -> {
-                    paymentESService.update(paymentInfo.paymentId) {
-                        it.logProcessing(false, now(), paymentInfo.transactionId, reason = "Request timeout.")
-                    }
+                val time = when (properties) {
+                    properties4 -> processTime4
+                    properties3 -> processTime3
+                    else -> processTime2
                 }
 
-                else -> {
-                    logger.error("[${properties.accountName}] Payment failed for txId: ${paymentInfo.transactionId}," +
-                            " payment: ${paymentInfo.paymentId}", e)
-
-                    paymentESService.update(paymentInfo.paymentId) {
-                        it.logProcessing(false, now(), paymentInfo.transactionId, reason = e.message)
-                    }
-                }
+                time.add((now() - paymentInfo.paymentStartedAt) / 1000)
             }
-        } finally {
-            val time = when (properties) {
-                properties4 -> processTime4
-                properties3 -> processTime3
-                else -> processTime2
-            }
-
-            time.add((now() - paymentInfo.paymentStartedAt) / 1000)
-        }
+        })
     }
+
+//        try {
+//            client.newCall(request).execute().use { response ->
+//                val body = try {
+//                    mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
+//                } catch (e: Exception) {
+//                    logger.error("[${properties.accountName}] [ERROR] Payment processed for txId: ${paymentInfo.transactionId}, payment: ${paymentInfo.paymentId}, result code: ${response.code}, reason: ${response.body?.string()}")
+//                    ExternalSysResponse(false, e.message)
+//                }
+//
+//                logger.warn("[${properties.accountName}] Payment processed for txId: ${paymentInfo.transactionId}," +
+//                        " payment: ${paymentInfo.paymentId}, succeeded: ${body.result}, message: ${body.message}")
+//
+//                // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
+//                // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
+//                paymentESService.update(paymentInfo.paymentId) {
+//                    it.logProcessing(body.result, now(), paymentInfo.transactionId, reason = body.message)
+//                }
+//            }
+//        } catch (e: Exception) {
+//            when (e) {
+//                is SocketTimeoutException -> {
+//                    paymentESService.update(paymentInfo.paymentId) {
+//                        it.logProcessing(false, now(), paymentInfo.transactionId, reason = "Request timeout.")
+//                    }
+//                }
+//
+//                else -> {
+//                    logger.error("[${properties.accountName}] Payment failed for txId: ${paymentInfo.transactionId}," +
+//                            " payment: ${paymentInfo.paymentId}", e)
+//
+//                    paymentESService.update(paymentInfo.paymentId) {
+//                        it.logProcessing(false, now(), paymentInfo.transactionId, reason = e.message)
+//                    }
+//                }
+//            }
+//        } finally {
+//            val time = when (properties) {
+//                properties4 -> processTime4
+//                properties3 -> processTime3
+//                else -> processTime2
+//            }
+//
+//            time.add((now() - paymentInfo.paymentStartedAt) / 1000)
+//        }
+
 }
 
 public fun now() = System.currentTimeMillis()
