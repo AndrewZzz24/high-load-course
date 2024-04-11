@@ -48,16 +48,16 @@ class ExternalServicesConfig(
         )
 
         // Call costs 30
-        private val accountProps_42 = ExternalServiceProperties(
+        private val accountProps_4 = ExternalServiceProperties(
             "test",
-            "default-42",
+            "default-4",
             parallelRequests = 8,
             rateLimitPerSec = 5,
             callCost = 30,
             request95thPercentileProcessingTime = Duration.ofMillis(10_000),
         )
 
-        val properties = listOf(accountProps_2, accountProps_3, accountProps_42)
+        val properties = listOf(accountProps_2, accountProps_3, accountProps_4)
     }
 
     @Bean(PRIMARY_PAYMENT_BEAN)
