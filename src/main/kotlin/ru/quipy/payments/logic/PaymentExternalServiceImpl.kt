@@ -5,9 +5,6 @@ import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import okhttp3.*
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
-import com.fasterxml.jackson.module.kotlin.registerKotlinModule
-import okhttp3.*
-import ru.quipy.common.utils.NamedThreadFactory
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.io.IOException
@@ -16,7 +13,6 @@ import java.time.Duration
 import java.util.*
 import java.util.concurrent.Executors
 import ru.quipy.common.utils.RateLimiter
-import java.util.*
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
@@ -59,24 +55,39 @@ class PaymentExternalServiceImpl(
     private val callbackExecutor4 = Executors.newFixedThreadPool(properties4.parallelRequests)
     private val callbackExecutor3 = Executors.newFixedThreadPool(properties3.parallelRequests)
     private val callbackExecutor2 = Executors.newFixedThreadPool(properties2.parallelRequests)
+    private val httpClientExecutor = Executors.newFixedThreadPool(80)
+    private val client4 = OkHttpClient.Builder().run {
+        dispatcher(Dispatcher(httpClientExecutor)
+                .apply {
+                    maxRequests = 400
+                    maxRequestsPerHost = 400
+                })
+        connectionPool(ConnectionPool(100, 5, TimeUnit.MINUTES))
+        protocols(listOf(Protocol.H2_PRIOR_KNOWLEDGE))
+        build()
+    }
 
-    private val client4 = OkHttpClient.Builder()
-            .dispatcher(Dispatcher(accountExecutor4).apply { maxRequests = properties4.parallelRequests })
-            .protocols(Collections.singletonList(Protocol.H2_PRIOR_KNOWLEDGE))
-            .connectionPool(ConnectionPool(properties4.parallelRequests, paymentOperationTimeout.seconds, TimeUnit.SECONDS))
-            .build()
+    private val client3 = OkHttpClient.Builder().run {
+        dispatcher(Dispatcher(httpClientExecutor)
+                .apply {
+                    maxRequests = 400
+                    maxRequestsPerHost = 400
+                })
+        connectionPool(ConnectionPool(100, 5, TimeUnit.MINUTES))
+        protocols(listOf(Protocol.H2_PRIOR_KNOWLEDGE))
+        build()
+    }
 
-    private val client3 = OkHttpClient.Builder()
-            .dispatcher(Dispatcher(accountExecutor3).apply { maxRequests = properties3.parallelRequests })
-            .protocols(Collections.singletonList(Protocol.H2_PRIOR_KNOWLEDGE))
-            .connectionPool(ConnectionPool(properties3.parallelRequests, paymentOperationTimeout.seconds, TimeUnit.SECONDS))
-            .build()
-
-    private val client2 = OkHttpClient.Builder()
-            .dispatcher(Dispatcher(accountExecutor2).apply { maxRequests = properties2.parallelRequests })
-            .protocols(Collections.singletonList(Protocol.H2_PRIOR_KNOWLEDGE))
-            .connectionPool(ConnectionPool(properties2.parallelRequests, paymentOperationTimeout.seconds, TimeUnit.SECONDS))
-            .build()
+    private val client2 = OkHttpClient.Builder().run {
+        dispatcher(Dispatcher(httpClientExecutor)
+                .apply {
+                    maxRequests = 400
+                    maxRequestsPerHost = 400
+                })
+        connectionPool(ConnectionPool(100, 5, TimeUnit.MINUTES))
+        protocols(listOf(Protocol.H2_PRIOR_KNOWLEDGE))
+        build()
+    }
 
     private fun chooseAccount(paymentStartedAt: Long): Pair<ExternalServiceProperties, LinkedBlockingQueue<PaymentInfo>> {
         if (Duration.ofSeconds((now() - paymentStartedAt) / 1000) >= paymentOperationTimeout) {
@@ -237,52 +248,6 @@ class PaymentExternalServiceImpl(
             }
         })
     }
-
-//        try {
-//            client.newCall(request).execute().use { response ->
-//                val body = try {
-//                    mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
-//                } catch (e: Exception) {
-//                    logger.error("[${properties.accountName}] [ERROR] Payment processed for txId: ${paymentInfo.transactionId}, payment: ${paymentInfo.paymentId}, result code: ${response.code}, reason: ${response.body?.string()}")
-//                    ExternalSysResponse(false, e.message)
-//                }
-//
-//                logger.warn("[${properties.accountName}] Payment processed for txId: ${paymentInfo.transactionId}," +
-//                        " payment: ${paymentInfo.paymentId}, succeeded: ${body.result}, message: ${body.message}")
-//
-//                // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
-//                // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
-//                paymentESService.update(paymentInfo.paymentId) {
-//                    it.logProcessing(body.result, now(), paymentInfo.transactionId, reason = body.message)
-//                }
-//            }
-//        } catch (e: Exception) {
-//            when (e) {
-//                is SocketTimeoutException -> {
-//                    paymentESService.update(paymentInfo.paymentId) {
-//                        it.logProcessing(false, now(), paymentInfo.transactionId, reason = "Request timeout.")
-//                    }
-//                }
-//
-//                else -> {
-//                    logger.error("[${properties.accountName}] Payment failed for txId: ${paymentInfo.transactionId}," +
-//                            " payment: ${paymentInfo.paymentId}", e)
-//
-//                    paymentESService.update(paymentInfo.paymentId) {
-//                        it.logProcessing(false, now(), paymentInfo.transactionId, reason = e.message)
-//                    }
-//                }
-//            }
-//        } finally {
-//            val time = when (properties) {
-//                properties4 -> processTime4
-//                properties3 -> processTime3
-//                else -> processTime2
-//            }
-//
-//            time.add((now() - paymentInfo.paymentStartedAt) / 1000)
-//        }
-
 }
 
 public fun now() = System.currentTimeMillis()
