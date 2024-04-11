@@ -8,6 +8,7 @@ import ru.quipy.common.utils.NamedThreadFactory
 import ru.quipy.common.utils.RateLimiter
 import ru.quipy.payments.logic.ExternalServiceProperties
 import java.time.Duration
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
@@ -18,11 +19,13 @@ class Account(
     val rateLimiter = RateLimiter(properties.rateLimitPerSec)
     val paymentOperationTimeout: Duration = Duration.ofSeconds(80)
 
-    val httpClientExecutor = Executors.newFixedThreadPool(properties.parallelRequests)
+    private val httpClientExecutor: ExecutorService = Executors.newFixedThreadPool(properties.parallelRequests,
+            NamedThreadFactory("${properties.accountName}-http-executor")
+    )
 
-    val accountExecutor = Executors.newFixedThreadPool(100)
+    val accountExecutor: ExecutorService = Executors.newFixedThreadPool(100, NamedThreadFactory("${properties.accountName}-account-executor"))
 
-    val responsePool = Executors.newFixedThreadPool(100)
+    val responsePool: ExecutorService = Executors.newFixedThreadPool(100, NamedThreadFactory("${properties.accountName}-payment-response"))
 
     val httpClient = OkHttpClient.Builder().run {
         dispatcher(Dispatcher(httpClientExecutor)

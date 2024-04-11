@@ -33,39 +33,45 @@ class PaymentExternalServiceImpl(
     @Autowired
     private lateinit var paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>
 
+    val circuitBreaker = CircuitBreaker.of("paymentService", CircuitBreakerConfig.custom()
+            .failureRateThreshold(50.0f)
+            .waitDurationInOpenState(Duration.ofMillis(10000))
+            .build())
 
     override fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long) {
-        val account: Account
-        try {
-            account =
-                    accountService.getTheCheapestAvailableAccount(paymentStartedAt)
-                            ?: throw NotFoundException("There is no available account")
-        } catch (e: Exception) {
-            return
-        }
-
-        val accountName = account.properties.accountName
-        val transactionId = UUID.randomUUID()
-        logger.warn("[$accountName] Submitting payment request for payment $paymentId. Already passed: ${now() - paymentStartedAt} ms")
-        logger.info("[$accountName] Submit for $paymentId , txId: $transactionId")
-
-        // Вне зависимости от исхода оплаты важно отметить что она была отправлена.
-        // Это требуется сделать ВО ВСЕХ СЛУЧАЯХ, поскольку эта информация используется сервисом тестирования.
-        paymentESService.update(paymentId) {
-            it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
-        }
-
-        account.accountExecutor.submit {
+        CircuitBreaker.decorateRunnable(circuitBreaker) {
+            val account: Account
             try {
-                processPaymentRequest(paymentId, transactionId, account, paymentStartedAt)
+                account =
+                        accountService.getTheCheapestAvailableAccount(paymentStartedAt)
+                                ?: throw NotFoundException("There is no available account")
             } catch (e: Exception) {
-                logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
+                return@decorateRunnable
+            }
 
-                paymentESService.update(paymentId) {
-                    it.logProcessing(false, now(), transactionId, reason = e.message)
+            val accountName = account.properties.accountName
+            val transactionId = UUID.randomUUID()
+            logger.warn("[$accountName] Submitting payment request for payment $paymentId. Already passed: ${now() - paymentStartedAt} ms")
+            logger.info("[$accountName] Submit for $paymentId , txId: $transactionId")
+
+            // Вне зависимости от исхода оплаты важно отметить что она была отправлена.
+            // Это требуется сделать ВО ВСЕХ СЛУЧАЯХ, поскольку эта информация используется сервисом тестирования.
+            paymentESService.update(paymentId) {
+                it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
+            }
+
+            account.accountExecutor.submit {
+                try {
+                    processPaymentRequest(paymentId, transactionId, account, paymentStartedAt)
+                } catch (e: Exception) {
+                    logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
+
+                    paymentESService.update(paymentId) {
+                        it.logProcessing(false, now(), transactionId, reason = e.message)
+                    }
                 }
             }
-        }
+        }.run()
     }
 
     private fun processPaymentRequest(paymentId: UUID, transactionId: UUID, account: Account, paymentStartedAt: Long) {
