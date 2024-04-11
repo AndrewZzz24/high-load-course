@@ -8,7 +8,9 @@ import java.time.Duration
 
 
 @Configuration
-class ExternalServicesConfig {
+class ExternalServicesConfig(
+        val accountService: AccountService
+) {
     companion object {
         const val PRIMARY_PAYMENT_BEAN = "PRIMARY_PAYMENT_BEAN"
 
@@ -21,6 +23,7 @@ class ExternalServicesConfig {
             "default-1",
             parallelRequests = 10000,
             rateLimitPerSec = 100,
+            callCost = 100,
             request95thPercentileProcessingTime = Duration.ofMillis(1000),
         )
 
@@ -30,6 +33,7 @@ class ExternalServicesConfig {
             "default-2",
             parallelRequests = 100,
             rateLimitPerSec = 30,
+            callCost = 70,
             request95thPercentileProcessingTime = Duration.ofMillis(10_000),
         )
 
@@ -39,24 +43,26 @@ class ExternalServicesConfig {
             "default-3",
             parallelRequests = 30,
             rateLimitPerSec = 8,
+            callCost = 40,
             request95thPercentileProcessingTime = Duration.ofMillis(10_000),
         )
 
         // Call costs 30
-        private val accountProps_4 = ExternalServiceProperties(
+        private val accountProps_42 = ExternalServiceProperties(
             "test",
-            "default-4",
+            "default-42",
             parallelRequests = 8,
             rateLimitPerSec = 5,
+            callCost = 30,
             request95thPercentileProcessingTime = Duration.ofMillis(10_000),
         )
+
+        val properties = listOf(accountProps_2, accountProps_3, accountProps_42)
     }
 
     @Bean(PRIMARY_PAYMENT_BEAN)
     fun fastExternalService() =
         PaymentExternalServiceImpl(
-            accountProps_4,
-            accountProps_3,
-            accountProps_2
+                accountService
         )
 }
