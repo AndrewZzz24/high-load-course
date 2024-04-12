@@ -20,12 +20,12 @@ class Account(
     val paymentOperationTimeout: Duration = Duration.ofSeconds(80)
 
     private val httpClientExecutor: ExecutorService = Executors.newFixedThreadPool(properties.parallelRequests,
-            NamedThreadFactory("${properties.accountName}-http-executor")
+            NamedThreadFactory("${properties.accountName}-httpClientExecutor")
     )
 
-    val accountExecutor: ExecutorService = Executors.newFixedThreadPool(100, NamedThreadFactory("${properties.accountName}-account-executor"))
+    val accountExecutor: ExecutorService = Executors.newFixedThreadPool(100, NamedThreadFactory("${properties.accountName}-accountExecutor"))
 
-    val responsePool: ExecutorService = Executors.newFixedThreadPool(100, NamedThreadFactory("${properties.accountName}-payment-response"))
+    val responsePool: ExecutorService = Executors.newFixedThreadPool(100, NamedThreadFactory("${properties.accountName}-paymentResponse"))
 
     val httpClient = OkHttpClient.Builder().run {
         dispatcher(Dispatcher(httpClientExecutor)

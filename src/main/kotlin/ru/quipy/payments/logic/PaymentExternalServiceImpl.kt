@@ -16,6 +16,7 @@ import java.time.Duration
 import java.util.*
 import io.github.resilience4j.circuitbreaker.CircuitBreaker
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig
+import java.lang.RuntimeException
 import java.util.concurrent.TimeoutException
 
 
@@ -33,52 +34,54 @@ class PaymentExternalServiceImpl(
     @Autowired
     private lateinit var paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>
 
-    val circuitBreaker = CircuitBreaker.of("paymentService", CircuitBreakerConfig.custom()
+    val circuitBreaker = CircuitBreaker.of("PaymentExternalService", CircuitBreakerConfig.custom()
             .failureRateThreshold(50.0f)
             .waitDurationInOpenState(Duration.ofMillis(10000))
             .build())
 
     override fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long) {
-        CircuitBreaker.decorateRunnable(circuitBreaker) {
-            val account: Account
-            try {
-                account =
-                        accountService.getTheCheapestAvailableAccount(paymentStartedAt)
-                                ?: throw NotFoundException("There is no available account")
-            } catch (e: Exception) {
-                return@decorateRunnable
-            }
+        val account: Account
 
-            val accountName = account.properties.accountName
-            val transactionId = UUID.randomUUID()
-            logger.warn("[$accountName] Submitting payment request for payment $paymentId. Already passed: ${now() - paymentStartedAt} ms")
-            logger.info("[$accountName] Submit for $paymentId , txId: $transactionId")
-
-            // Вне зависимости от исхода оплаты важно отметить что она была отправлена.
-            // Это требуется сделать ВО ВСЕХ СЛУЧАЯХ, поскольку эта информация используется сервисом тестирования.
+        try {
+            account =
+                    accountService.getTheCheapestAvailableAccount(paymentStartedAt)
+                            ?: throw NotFoundException("There is no available account")
+        } catch (e: Exception) {
             paymentESService.update(paymentId) {
-                it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
+                it.logProcessing(false, now(), null, reason = e.message)
             }
+            return
+        }
+        val transactionId = UUID.randomUUID()
+        val accountName = account.properties.accountName
 
-            account.accountExecutor.submit {
-                try {
-                    processPaymentRequest(paymentId, transactionId, account, paymentStartedAt)
-                } catch (e: Exception) {
-                    logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
+        logger.warn("[$accountName] Submitting payment request for payment $paymentId. Already passed: ${now() - paymentStartedAt} ms")
+        logger.info("[$accountName] Submit for $paymentId , txId: $transactionId")
 
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = e.message)
-                    }
+        // Вне зависимости от исхода оплаты важно отметить что она была отправлена.
+        // Это требуется сделать ВО ВСЕХ СЛУЧАЯХ, поскольку эта информация используется сервисом тестирования.
+        paymentESService.update(paymentId) {
+            it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
+        }
+
+        account.accountExecutor.submit {
+            try {
+                processPaymentRequest(paymentId, transactionId, account, paymentStartedAt)
+            } catch (e: Exception) {
+                logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
+
+                paymentESService.update(paymentId) {
+                    it.logProcessing(false, now(), transactionId, reason = e.message)
                 }
             }
-        }.run()
+        }
+
     }
 
     private fun processPaymentRequest(paymentId: UUID, transactionId: UUID, account: Account, paymentStartedAt: Long) {
         if (Duration.ofSeconds((now() - paymentStartedAt) / 1000) >= account.paymentOperationTimeout) {
             throw TimeoutException("Payment operation timed out.")
         }
-
         val accountName = account.properties.accountName
         val serviceName = account.properties.serviceName
 
@@ -86,55 +89,58 @@ class PaymentExternalServiceImpl(
             url("http://localhost:1234/external/process?serviceName=${serviceName}&accountName=${accountName}&transactionId=$transactionId")
             post(emptyBody)
         }.build()
+        CircuitBreaker.decorateRunnable(circuitBreaker) {
+            account.httpClient.newCall(request).enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    account.responsePool.submit {
+                        when (e) {
+                            is SocketTimeoutException -> {
+                                paymentESService.update(paymentId) {
+                                    it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
+                                }
+                            }
 
-        account.httpClient.newCall(request).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {
-                account.responsePool.submit {
-                    when (e) {
-                        is SocketTimeoutException -> {
-                            paymentESService.update(paymentId) {
-                                it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
+                            else -> {
+                                logger.error(
+                                        "[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e
+                                )
+
+                                paymentESService.update(paymentId) {
+                                    it.logProcessing(false, now(), transactionId, reason = e.message)
+                                }
                             }
                         }
-
-                        else -> {
-                            logger.error(
-                                    "[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e
-                            )
-
-                            paymentESService.update(paymentId) {
-                                it.logProcessing(false, now(), transactionId, reason = e.message)
-                            }
-                        }
+                        val speed = minOf(account.processTime.average(), account.properties.rateLimitPerSec.toDouble())
+                        logger.error("[$accountName] Theoretical speed for $paymentId , txId $transactionId : $speed")
                     }
+                    throw RuntimeException("Payment failed")
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    account.responsePool.submit {
+                        val body = try {
+                            mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
+                        } catch (e: Exception) {
+                            logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
+                            ExternalSysResponse(false, e.message)
+                        }
+
+                        logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
+
+                        // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
+                        // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
+                        paymentESService.update(paymentId) {
+                            it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                        }
+
+                    }
+                    account.processTime.add((now() - paymentStartedAt) / 1000)
                     val speed = minOf(account.processTime.average(), account.properties.rateLimitPerSec.toDouble())
                     logger.error("[$accountName] Theoretical speed for $paymentId , txId $transactionId : $speed")
                 }
-            }
-
-            override fun onResponse(call: Call, response: Response) {
-                account.responsePool.submit {
-                    val body = try {
-                        mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
-                    } catch (e: Exception) {
-                        logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
-                        ExternalSysResponse(false, e.message)
-                    }
-
-                    logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
-
-                    // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
-                    // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(body.result, now(), transactionId, reason = body.message)
-                    }
-
-                }
-                account.processTime.add((now() - paymentStartedAt) / 1000)
-                val speed = minOf(account.processTime.average(), account.properties.rateLimitPerSec.toDouble())
-                logger.error("[$accountName] Theoretical speed for $paymentId , txId $transactionId : $speed")
-            }
-        })
+            })
+        }.run()
     }
 }
+
 fun now() = System.currentTimeMillis()
